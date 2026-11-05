@@ -1,0 +1,118 @@
+# ==============================================================================
+# GitHub Actions Workflow: Continuous Deployment (CD) to Google Cloud Run
+# ==============================================================================
+# Purpose:
+# Packages the verified application container, pushes it to Google Artifact Registry,
+# and deploys it as a serverless container service on Google Cloud Run.
+#
+# Triggers:
+# - Runs automatically ONLY after the CI workflow completes successfully on 'main'.
+# - Can also be triggered manually using workflow_dispatch.
+#
+# Security:
+# - Uses Google Cloud Workload Identity Federation (WIF) instead of long-lived
+#   service account JSON keys. Keyless OpenID Connect (OIDC) is modern industry standard.
+# ==============================================================================
+
+name: CD - Deploy to Google Cloud Run
+
+on:
+  workflow_run:
+    workflows: [ "CI - Test, Train & Validate" ]
+    branches: [ "main" ]
+    types:
+      - completed
+  workflow_dispatch: # Allows manual trigger from the GitHub Actions UI
+
+# Permissions required for requesting GitHub OIDC token for Workload Identity Federation
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Build, Push & Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    # Only deploy if triggered manually OR if the upstream CI workflow finished with 'success'
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      # Step 1: Check out source code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Step 2: Check if GCP secrets are configured
+      # If secrets are missing (e.g. initial classroom fork), log educational instructions
+      # and skip deployment gracefully rather than throwing an obscure error.
+      - name: Check GCP Deployment Configuration
+        id: check_config
+        run: |
+          if [ -z "${{ secrets.GCP_PROJECT_ID }}" ] || [ -z "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
+            echo "::warning::GCP credentials secrets are not yet configured in this repository."
+            echo "To enable automated Cloud Run deployment, configure the following GitHub Secrets:"
+            echo "  - GCP_PROJECT_ID"
+            echo "  - GCP_REGION (e.g. us-central1)"
+            echo "  - GCP_WORKLOAD_IDENTITY_PROVIDER"
+            echo "  - GCP_SERVICE_ACCOUNT"
+            echo "Refer to the README.md for one-time GCP setup instructions."
+            echo "has_secrets=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_secrets=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Step 3: Train model to ensure fresh artifact is included in build context
+      - name: Train Model & Generate Artifacts
+        if: steps.check_config.outputs.has_secrets == 'true'
+        run: |
+          python -m pip install -r requirements.txt
+          python -m src.train
+
+      # Step 4: Authenticate to Google Cloud using Workload Identity Federation
+      # No long-lived service account keys are stored or exposed!
+      - name: Authenticate to Google Cloud
+        if: steps.check_config.outputs.has_secrets == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      # Step 5: Configure Docker CLI to authenticate with Google Artifact Registry
+      - name: Configure Docker for Artifact Registry
+        if: steps.check_config.outputs.has_secrets == 'true'
+        run: |
+          gcloud auth configure-docker "${{ secrets.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      # Step 6: Build, tag, and push container image to Artifact Registry
+      - name: Build & Push Image to Artifact Registry
+        if: steps.check_config.outputs.has_secrets == 'true'
+        env:
+          IMAGE_URI: "${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/mlops-repo/house-price-api:${{ github.sha }}"
+        run: |
+          echo "Building image: $IMAGE_URI"
+          docker build -t "$IMAGE_URI" .
+          echo "Pushing image to Artifact Registry..."
+          docker push "$IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+      # Step 7: Deploy container image to Google Cloud Run
+      - name: Deploy to Cloud Run
+        if: steps.check_config.outputs.has_secrets == 'true'
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: house-price-api
+          image: ${{ env.IMAGE_URI }}
+          region: ${{ secrets.GCP_REGION }}
+          flags: "--allow-unauthenticated --port=8000 --memory=512Mi --cpu=1"
+
+      # Step 8: Post-Deployment Smoke Test
+      # Verifies the live service responds with HTTP 200 on /health
+      - name: Post-Deployment Smoke Test
+        if: steps.check_config.outputs.has_secrets == 'true'
+        run: |
+          SERVICE_URL="${{ steps.deploy.outputs.url }}"
+          echo "Testing live deployment at $SERVICE_URL/health..."
+          curl -f -s "$SERVICE_URL/health" | grep -q '"status":"healthy"'
+          echo "Smoke test passed successfully! Live API is healthy."
+

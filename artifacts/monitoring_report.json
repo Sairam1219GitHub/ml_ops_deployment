@@ -1,0 +1,72 @@
+{
+  "timestamp": "2026-11-05T15:50:11.829505+00:00",
+  "overall_drift_detected": true,
+  "sample_sizes": {
+    "reference_samples": 1200,
+    "recent_logged_samples": 60
+  },
+  "threshold_ratio": 0.2,
+  "feature_metrics": {
+    "area_sqft": {
+      "reference_statistics": {
+        "count": 1200,
+        "mean": 1988.85,
+        "std": 596.54,
+        "min": 600.0,
+        "max": 3907.3
+      },
+      "recent_statistics": {
+        "count": 60,
+        "mean": 3857.74,
+        "std": 350.48,
+        "min": 3031.0,
+        "max": 4584.4
+      },
+      "relative_mean_difference": 0.9397,
+      "threshold_applied": 0.2,
+      "drift_detected": true,
+      "status": "ALERT_DRIFT_DETECTED"
+    },
+    "bedrooms": {
+      "reference_statistics": {
+        "count": 1200,
+        "mean": 2.99,
+        "std": 1.41,
+        "min": 1.0,
+        "max": 5.0
+      },
+      "recent_statistics": {
+        "count": 60,
+        "mean": 5.48,
+        "std": 1.07,
+        "min": 4.0,
+        "max": 7.0
+      },
+      "relative_mean_difference": 0.8328,
+      "threshold_applied": 0.2,
+      "drift_detected": true,
+      "status": "ALERT_DRIFT_DETECTED"
+    },
+    "age_years": {
+      "reference_statistics": {
+        "count": 1200,
+        "mean": 24.9,
+        "std": 14.49,
+        "min": 0.0,
+        "max": 50.0
+      },
+      "recent_statistics": {
+        "count": 60,
+        "mean": 5.19,
+        "std": 2.85,
+        "min": 0.1,
+        "max": 10.0
+      },
+      "relative_mean_difference": 0.7916,
+      "threshold_applied": 0.2,
+      "drift_detected": true,
+      "status": "ALERT_DRIFT_DETECTED"
+    }
+  },
+  "teaching_note": "This report demonstrates statistical shift detection between baseline training data and live inference telemetry. Model quality monitoring (MAE/RMSE on production traffic) requires true sale prices, which are subject to real-world ground-truth delay."
+}

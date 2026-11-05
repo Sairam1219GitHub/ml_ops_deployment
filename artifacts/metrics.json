@@ -1,0 +1,9 @@
+{
+  "mae": 14144.33,
+  "rmse": 18061.27,
+  "threshold_rmse": 35000.0,
+  "n_train": 1200,
+  "n_test": 300,
+  "random_seed": 42,
+  "model_type": "Pipeline(StandardScaler, RandomForestRegressor)"
+}

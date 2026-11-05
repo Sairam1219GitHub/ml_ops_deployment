@@ -1,0 +1,79 @@
+# ==============================================================================
+# GitHub Actions Workflow: Continuous Integration (CI)
+# ==============================================================================
+# Purpose:
+# Validates code quality, runs automated tests, trains the model, checks artifact
+# integrity against quality gates, and verifies the Docker container build.
+#
+# Triggers:
+# - On every pull request targeting 'main'
+# - On every direct push to 'main'
+# ==============================================================================
+
+name: CI - Test, Train & Validate
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    name: Lint, Test, Train & Docker Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out repository source code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up deterministic Python environment
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip" # Caches pip dependencies across runs to speed up workflow
+
+      # Step 3: Install pinned application and testing dependencies
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 4: Execute Machine Learning Training Pipeline
+      # In MLOps CI, model training is tested in an ephemeral runner.
+      # If RMSE exceeds the acceptable threshold ($35,000), train.py raises an exception
+      # and fails the CI job, preventing bad models from ever proceeding to CD.
+      - name: Run Model Training & Quality Gate
+        env:
+          MAX_ALLOWED_RMSE: "35000.0"
+        run: |
+          python -m src.train
+
+      # Step 5: Verify Critical Artifacts Were Generated
+      # Confirms that the pipeline artifact, baseline reference data, and metrics exist.
+      - name: Validate Generated Model Artifacts
+        run: |
+          echo "Checking artifact directory contents..."
+          test -f artifacts/house_price_pipeline.joblib || (echo "Missing model pipeline joblib!" && exit 1)
+          test -f artifacts/reference_data.csv || (echo "Missing reference dataset CSV!" && exit 1)
+          test -f artifacts/metrics.json || (echo "Missing evaluation metrics JSON!" && exit 1)
+          echo "All required artifacts successfully validated."
+          cat artifacts/metrics.json
+
+      # Step 6: Run Pytest Test Suite
+      # Executes unit tests (model deserialization, prediction math, sanity checks)
+      # and integration tests (FastAPI /health and /predict endpoints).
+      - name: Run Pytest Suite
+        run: |
+          pytest -v
+
+      # Step 7: Verify Docker Container Build
+      # Confirms that the Dockerfile builds cleanly and that all dependencies and
+      # artifacts are properly packaged into an OCI container image.
+      - name: Build Docker Image
+        run: |
+          docker build -t house-price-api:${{ github.sha }} .
+          echo "Docker image build successful."
+

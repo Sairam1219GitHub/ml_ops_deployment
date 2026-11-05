@@ -1,0 +1,96 @@
+# ==============================================================================
+# GitHub Actions Workflow: Automated Data Drift Monitoring
+# ==============================================================================
+# Purpose:
+# Demonstrates periodic background monitoring. Compares live inference telemetry
+# against the training baseline and generates a drift audit report.
+#
+# Triggers:
+# - Manual trigger via GitHub Actions UI (workflow_dispatch)
+# - Scheduled cron job (every night at 06:00 UTC)
+#
+# IMPORTANT TEACHING NOTE ON CI/CD MONITORING:
+# -------------------------------------------
+# Running a monitoring script inside a scheduled GitHub Actions runner is an effective,
+# low-cost pattern for classroom demonstrations and batch inference jobs.
+#
+# However, in high-throughput production systems:
+# - Real-time metrics (latency, QPS, 5xx errors) must be monitored continuously
+#   using tools like Prometheus, Datadog, or CloudWatch with PagerDuty alerts.
+# - Production drift engines (e.g., Evidently AI, Arize, Whylogs, AWS SageMaker Clarify)
+#   run streaming or micro-batch calculations directly inside the data platform
+#   (e.g., querying Google BigQuery or Snowflake) rather than cloning git repositories.
+# ==============================================================================
+
+name: Monitoring - Data Drift Detection
+
+on:
+  schedule:
+    # Runs daily at 06:00 UTC (01:00 EST)
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      simulate_drift:
+        description: "Set to 'true' to simulate drifted incoming production traffic for demo"
+        required: false
+        default: "false"
+        type: boolean
+
+jobs:
+  drift-analysis:
+    name: Run Drift Analysis & Export Report
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out repository
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # Step 3: Install dependencies
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      # Step 4: Ensure reference training data is available
+      - name: Ensure Baseline Reference Data Exists
+        run: |
+          if [ ! -f artifacts/reference_data.csv ]; then
+            echo "Reference data not found. Training model to generate baseline..."
+            python -m src.train
+          fi
+
+      # Step 5: Execute drift monitoring script
+      - name: Execute Feature Drift Monitor
+        env:
+          DRIFT_THRESHOLD_RATIO: "0.20"
+        run: |
+          if [ "${{ inputs.simulate_drift }}" == "true" ]; then
+            echo "Running monitor with simulated feature drift..."
+            python -m src.monitor --simulate-drift
+          else
+            echo "Running standard monitor..."
+            python -m src.monitor
+          fi
+
+      # Step 6: Print report summary into the GitHub Actions step log
+      - name: Display Monitoring Summary
+        run: |
+          echo "=================== MONITORING REPORT ==================="
+          cat artifacts/monitoring_report.json
+          echo "========================================================="
+
+      # Step 7: Upload monitoring report as downloadable workflow artifact
+      - name: Upload Monitoring Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitoring-drift-report
+          path: artifacts/monitoring_report.json
+          retention-days: 14
+
