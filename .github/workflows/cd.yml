@@ -19,7 +19,7 @@ name: CD - Deploy to Google Cloud Run
 on:
   workflow_run:
     workflows: [ "CI - Test, Train & Validate" ]
-    branches: [ "main" ]
+    branches: [ "main", "dev" ]
     types:
       - completed
   workflow_dispatch: # Allows manual trigger from the GitHub Actions UI
