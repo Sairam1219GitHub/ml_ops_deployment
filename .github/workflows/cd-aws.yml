@@ -1,18 +1,13 @@
 # ==============================================================================
-# GitHub Actions Workflow: Continuous Deployment (CD) to AWS (ECR + App Runner)
+# GitHub Actions Workflow: Continuous Deployment (CD) to AWS App Runner & ECR
 # ==============================================================================
 # Purpose:
-# Automatically builds the container, pushes it to Amazon Elastic Container Registry (ECR),
-# and deploys/updates the serverless microservice on AWS App Runner.
+# Automatically packages the Docker container, pushes it to Amazon ECR,
+# and deploys it as a fully-managed serverless web service on AWS App Runner.
 #
 # Triggers:
 # - Runs automatically when CI completes successfully on 'main' or 'dev'
-# - Can also be triggered manually using workflow_dispatch
-#
-# AWS Secrets Required in GitHub:
-# - AWS_ACCESS_KEY_ID
-# - AWS_SECRET_ACCESS_KEY
-# - AWS_REGION (e.g. us-east-1)
+# - Can also be triggered manually via workflow_dispatch
 # ==============================================================================
 
 name: CD - Deploy to AWS App Runner
@@ -29,72 +24,69 @@ permissions:
   contents: read
 
 jobs:
-  deploy-aws:
-    name: Build, Push to ECR & Deploy to AWS App Runner
+  deploy-to-aws:
+    name: Build, Push to ECR & Deploy to App Runner
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
-      # Step 1: Check out repository
+      # Step 1: Checkout repository code
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Step 2: Validate AWS Secret Configuration
-      - name: Verify AWS Secrets
-        id: check_aws
+      # Step 2: Validate AWS Secrets are configured
+      - name: Check AWS Secrets Configuration
+        id: check_config
         run: |
           if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
-            echo "::warning::AWS credentials are not configured in GitHub Secrets."
-            echo "Please add AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION to GitHub Secrets."
+            echo "::warning::AWS credentials secrets (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) are not yet configured."
+            echo "To enable automated AWS deployment, add the following secrets in GitHub Repository Settings:"
+            echo "  - AWS_ACCESS_KEY_ID"
+            echo "  - AWS_SECRET_ACCESS_KEY"
+            echo "  - AWS_REGION (e.g. us-east-1 or ap-south-1)"
             echo "has_secrets=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_secrets=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Step 3: Setup Python and Train Model to guarantee artifacts are in sync
-      - name: Set up Python & Train Model
-        if: steps.check_aws.outputs.has_secrets == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install Dependencies & Train Pipeline
-        if: steps.check_aws.outputs.has_secrets == 'true'
+      # Step 3: Train model to ensure fresh artifact is bundled in build
+      - name: Train Model & Generate Artifacts
+        if: steps.check_config.outputs.has_secrets == 'true'
         run: |
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
           python -m src.train
 
-      # Step 4: Configure AWS Credentials
+      # Step 4: Authenticate with AWS
       - name: Configure AWS Credentials
-        if: steps.check_aws.outputs.has_secrets == 'true'
+        if: steps.check_config.outputs.has_secrets == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
 
-      # Step 5: Log in to Amazon ECR
+      # Step 5: Log in to Amazon Elastic Container Registry (ECR)
       - name: Log in to Amazon ECR
-        if: steps.check_aws.outputs.has_secrets == 'true'
+        if: steps.check_config.outputs.has_secrets == 'true'
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       # Step 6: Ensure ECR Repository Exists
       - name: Ensure ECR Repository Exists
-        if: steps.check_aws.outputs.has_secrets == 'true'
+        if: steps.check_config.outputs.has_secrets == 'true'
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: house-price-api
+          AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
         run: |
-          echo "Checking if repository '$ECR_REPOSITORY' exists..."
-          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" || \
-            aws ecr create-repository --repository-name "$ECR_REPOSITORY" --image-scanning-configuration scanOnPush=true
-          echo "ECR Repository is ready."
+          aws ecr describe-repositories --repository-names house-price-api --region $AWS_REGION 2>/dev/null || \
+          aws ecr create-repository \
+            --repository-name house-price-api \
+            --image-scanning-configuration scanOnPush=true \
+            --region $AWS_REGION
+          echo "ECR repository 'house-price-api' is ready."
 
       # Step 7: Build, Tag & Push Docker Image to ECR
-      - name: Build, Tag & Push Image to Amazon ECR
-        if: steps.check_aws.outputs.has_secrets == 'true'
+      - name: Build, Tag & Push Image to ECR
+        if: steps.check_config.outputs.has_secrets == 'true'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: house-price-api
@@ -104,27 +96,89 @@ jobs:
           LATEST_URI="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
           echo "Building Docker image: $IMAGE_URI"
           docker build -t "$IMAGE_URI" -t "$LATEST_URI" .
-          echo "Pushing Docker image to Amazon ECR..."
+          echo "Pushing images to Amazon ECR..."
           docker push "$IMAGE_URI"
           docker push "$LATEST_URI"
           echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
 
-      # Step 8: Trigger App Runner Deployment (if service exists)
-      - name: Deploy to AWS App Runner
-        if: steps.check_aws.outputs.has_secrets == 'true'
-        env:
-          SERVICE_NAME: house-price-service
+      # Step 8: Ensure IAM Role for App Runner ECR Access Exists
+      - name: Ensure App Runner ECR Access Role Exists
+        if: steps.check_config.outputs.has_secrets == 'true'
         run: |
-          echo "Checking if App Runner service '$SERVICE_NAME' exists..."
-          SERVICE_ARN=$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].ServiceArn" --output text)
-          
-          if [ -n "$SERVICE_ARN" ] && [ "$SERVICE_ARN" != "None" ]; then
-            echo "Service found: $SERVICE_ARN"
-            echo "Starting deployment with latest image..."
-            aws apprunner start-deployment --service-arn "$SERVICE_ARN"
-            echo "Deployment triggered successfully on AWS App Runner!"
-          else
-            echo "::notice::AWS App Runner service '$SERVICE_NAME' is not yet created."
-            echo "Image has been successfully pushed to Amazon ECR: $IMAGE_URI"
-            echo "You can now create the App Runner service in the AWS Console in 2 clicks pointing to this ECR image!"
+          ROLE_NAME="AppRunnerECRAccessRole"
+          ROLE_ARN=$(aws iam get-role --role-name $ROLE_NAME --query "Role.Arn" --output text 2>/dev/null || true)
+          if [ -z "$ROLE_ARN" ] || [ "$ROLE_ARN" == "None" ]; then
+            echo "Creating IAM role $ROLE_NAME for App Runner..."
+            TRUST_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"build.apprunner.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+            ROLE_ARN=$(aws iam create-role --role-name $ROLE_NAME --assume-role-policy-document "$TRUST_POLICY" --query "Role.Arn" --output text)
+            aws iam attach-role-policy --role-name $ROLE_NAME --policy-arn arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess
+            echo "Waiting 10s for IAM propagation..."
+            sleep 10
           fi
+          echo "APP_RUNNER_ROLE_ARN=$ROLE_ARN" >> "$GITHUB_ENV"
+          echo "Using App Runner Access Role: $ROLE_ARN"
+
+      # Step 9: Deploy or Update AWS App Runner Service
+      - name: Deploy to AWS App Runner
+        if: steps.check_config.outputs.has_secrets == 'true'
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+          SERVICE_NAME: "house-price-api"
+        run: |
+          SERVICE_ARN=$(aws apprunner list-services --region $AWS_REGION --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].ServiceArn | [0]" --output text 2>/dev/null || true)
+
+          if [ -z "$SERVICE_ARN" ] || [ "$SERVICE_ARN" == "None" ]; then
+            echo "Service does not exist. Creating new App Runner service '$SERVICE_NAME'..."
+            SOURCE_CONFIG="{\"ImageRepository\":{\"ImageIdentifier\":\"$IMAGE_URI\",\"ImageRepositoryType\":\"ECR\",\"ImageConfiguration\":{\"Port\":\"8000\"}},\"AuthenticationConfiguration\":{\"AccessRoleArn\":\"$APP_RUNNER_ROLE_ARN\"},\"AutoDeploymentsEnabled\":true}"
+            CREATE_OUTPUT=$(aws apprunner create-service \
+              --service-name "$SERVICE_NAME" \
+              --source-configuration "$SOURCE_CONFIG" \
+              --instance-configuration "{\"Cpu\":\"1024\",\"Memory\":\"2048\"}" \
+              --region "$AWS_REGION")
+            SERVICE_ARN=$(echo "$CREATE_OUTPUT" | jq -r '.Service.ServiceArn')
+            echo "Created App Runner service: $SERVICE_ARN"
+          else
+            echo "Service exists ($SERVICE_ARN). Updating image to $IMAGE_URI..."
+            SOURCE_CONFIG="{\"ImageRepository\":{\"ImageIdentifier\":\"$IMAGE_URI\",\"ImageRepositoryType\":\"ECR\",\"ImageConfiguration\":{\"Port\":\"8000\"}},\"AuthenticationConfiguration\":{\"AccessRoleArn\":\"$APP_RUNNER_ROLE_ARN\"},\"AutoDeploymentsEnabled\":true}"
+            aws apprunner update-service \
+              --service-arn "$SERVICE_ARN" \
+              --source-configuration "$SOURCE_CONFIG" \
+              --region "$AWS_REGION"
+          fi
+
+          echo "SERVICE_ARN=$SERVICE_ARN" >> "$GITHUB_ENV"
+
+      # Step 10: Wait for App Runner Service to Reach RUNNING Status
+      - name: Await Deployment & Retrieve Live URL
+        if: steps.check_config.outputs.has_secrets == 'true'
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+        run: |
+          echo "Waiting for App Runner deployment to complete (this typically takes 2-4 minutes)..."
+          for i in {1..30}; do
+            STATUS=$(aws apprunner describe-service --service-arn "$SERVICE_ARN" --region "$AWS_REGION" --query "Service.Status" --output text)
+            echo "[$i/30] Service status: $STATUS"
+            if [ "$STATUS" == "RUNNING" ]; then
+              SERVICE_URL=$(aws apprunner describe-service --service-arn "$SERVICE_ARN" --region "$AWS_REGION" --query "Service.ServiceUrl" --output text)
+              echo "==========================================================="
+              echo "APP RUNNER DEPLOYMENT SUCCESSFUL!"
+              echo "Live Service URL: https://$SERVICE_URL"
+              echo "API Documentation: https://$SERVICE_URL/docs"
+              echo "Health Endpoint:   https://$SERVICE_URL/health"
+              echo "==========================================================="
+              echo "SERVICE_URL=https://$SERVICE_URL" >> "$GITHUB_ENV"
+              break
+            elif [ "$STATUS" == "FAILED" ] || [ "$STATUS" == "DELETED" ]; then
+              echo "App Runner deployment failed with status: $STATUS"
+              exit 1
+            fi
+            sleep 15
+          done
+
+      # Step 11: Execute Live Health Smoke Test
+      - name: Live Smoke Test
+        if: steps.check_config.outputs.has_secrets == 'true' && env.SERVICE_URL != ''
+        run: |
+          echo "Probing live endpoint: $SERVICE_URL/health"
+          curl -f -s "$SERVICE_URL/health" | grep -q '"status":"healthy"'
+          echo "Smoke test passed! Live AWS deployment is operational."
