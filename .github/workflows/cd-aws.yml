@@ -182,3 +182,4 @@ jobs:
           echo "Probing live endpoint: $SERVICE_URL/health"
           curl -f -s "$SERVICE_URL/health" | grep -q '"status":"healthy"'
           echo "Smoke test passed! Live AWS deployment is operational."
+
